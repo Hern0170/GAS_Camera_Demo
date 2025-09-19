@@ -25,14 +25,13 @@ void UCombatCameraInstanceSubSystem::Deinitialize()
 APlayerController* UCombatCameraInstanceSubSystem::GetPC0() const
 {
 	// Return PlayerController 0 for single player
-   // In multiplayer need a specific PlayerControllers instead Not Sure if we are using PC0
+   // In multiplayer We need a specific PlayerControllers instead not sure if we are using PC0
 	if (UWorld* World = GetWorld())
 	{
 		return UGameplayStatics::GetPlayerController(World, 0);
 	}
 	return nullptr;
 }
-
 
 
 void UCombatCameraInstanceSubSystem::RegisterShot(FName ShotId, AActor* ShotActor)
@@ -48,54 +47,35 @@ void UCombatCameraInstanceSubSystem::RegisterShot(FName ShotId, AActor* ShotActo
 
 }
 
-void UCombatCameraInstanceSubSystem::RequestShot(FName ShotId, float BlendTime)
-{
-	// Try to find the shot in the map
-	TWeakObjectPtr<AActor>* Found = Shots.Find(ShotId);
-	if (!Found || !Found->IsValid())
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] ShotId NOT FOUND: %s"), *ShotId.ToString());
-		return;
-	}
-
-	if (APlayerController* PC = GetPC0())
-	{
-		// Configure blend parameters for a smooth transition
-		// (Basic settings now, but editable in the future)
-		FViewTargetTransitionParams Params;
-		Params.BlendTime = BlendTime;
-		Params.BlendFunction = EViewTargetBlendFunction::VTBlend_Cubic;
-
-		// Track current/last shot IDs
-		LastShotId = CurrentShotId;
-		CurrentShotId = ShotId;
-
-		// Perform the camera transition
-		PC->SetViewTarget(Found->Get(), Params);
-
-		if (bLogDebug)
-		{
-			UE_LOG(LogTemp, Log, TEXT("[CameraDirector] RequestShot -> %s (Blend=%.2f)"),
-				*ShotId.ToString(), BlendTime);
-		}
-	}
-}
-
 void UCombatCameraInstanceSubSystem::RequestOverview()
 {
-	// (Always request the overview shot)
-	RequestShot(OverviewShotId, 1.0f);
+	// Uses Overview ID fot Base
+	RequestShotID(Overview);
 }
 
-void UCombatCameraInstanceSubSystem::BuildFocusList()
+
+void UCombatCameraInstanceSubSystem::BuildTagList()
 {
+	//Clear Focus target list before building
 	FocusTargets.Reset();
+
 	if (UWorld* World = GetWorld())
 	{
-		// Find all actors in the level with the configured CombatantTag
-		// (We can use multiple tags)
 		TArray<AActor*> FoundActors;
-		UGameplayStatics::GetAllActorsWithTag(World, CombatantTag, FoundActors);
+
+		// Collect actors for every tag in the FocusTags array
+		for (const FName& Tag : FocusTags)
+		{
+			TArray<AActor*> ActorsWithTag;
+			UGameplayStatics::GetAllActorsWithTag(World, Tag, ActorsWithTag);
+			FoundActors.Append(ActorsWithTag);
+		}
+
+		// Remove duplicates (if actors have multiple tags)
+		TSet<AActor*> UniqueActors(FoundActors);
+		FoundActors = UniqueActors.Array();
+
+		// Store as weak pointers
 		for (AActor* A : FoundActors)
 		{
 			FocusTargets.Add(A);
@@ -104,47 +84,196 @@ void UCombatCameraInstanceSubSystem::BuildFocusList()
 
 		if (bLogDebug)
 		{
-			UE_LOG(LogTemp, Log, TEXT("[CameraDirector] FocusTargets = %d"), FocusTargets.Num());
+			UE_LOG(LogTemp, Log, TEXT("[CameraDirector] FocusTargets = %d (tags checked: %d)"),
+				FocusTargets.Num(), FocusTags.Num());
 		}
 	}
 }
 
-void UCombatCameraInstanceSubSystem::CycleNextTarget()
+void UCombatCameraInstanceSubSystem::CycleNextShot(float BlendTime)
 {
-	// If no targets collected yet, rebuild the list
-	if (FocusTargets.Num() == 0)
+	if (Shots.Num() == 0)
 	{
-		BuildFocusList();
-	}
-	// Still empty → nothing to focus
-	if (FocusTargets.Num() == 0) return;
-
-	// Move to next index (wrap around using modulo)
-	CurrentFocusIndex = (CurrentFocusIndex + 1) % FocusTargets.Num();
-
-	// Get the target(TargetActor) from the weak pointer
-	AActor* Target = FocusTargets[CurrentFocusIndex].Get();
-	RequestFocus(Target, 0.6f);
-}
-
-void UCombatCameraInstanceSubSystem::RequestFocus(AActor* Target, float BlendTime)
-{
-	if (!Target)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] RequestFocus: Target is null"));
+		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] CycleNextShot: no shots registered"));
 		return;
 	}
 
-	// For now, only log which actor is being focused.
-	// Later i will plug this into a BP_CamShot_TargetOrbit,
-	// set its TargetRef = Target, and then call RequestShot("Orbit_A").
-	// TODO: Add the orbit 
-	if (bLogDebug)
+	// Build a sorted array of Ids (deterministic order)
+	TArray<FName> SortedIds;
+	Shots.GenerateKeyArray(SortedIds);
+	SortedIds.Sort(FNameLexicalLess());
+	SortedIds.Remove(Overview);
+	// Find current index (or -1 if none)
+	int32 CurrIdx = SortedIds.IndexOfByKey(CurrentShotId);
+	// Next index wraps around
+	int32 NextIdx = (CurrIdx + 1) % SortedIds.Num();
+	const FName NextId = SortedIds[NextIdx];
+	RequestShotID(NextId, BlendTime);
+}
+
+void UCombatCameraInstanceSubSystem::CycleNextShotID(FName FocusShotId, float BlendTime)
+{
+	if (FocusTargets.Num() == 0)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[CameraDirector] RequestFocus -> %s"), *Target->GetName());
+		BuildTagList();
 	}
 
-	// TEMP: fallback overview until orbit shots exist
+	if (FocusTargets.Num() == 0)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] CycleNextTargetWithShot: no focus targets"));
+		RequestOverview();
+		return;
+	}
+
+	const int32 Count = FocusTargets.Num();
+
+	// Ensure the shot exists
+	TWeakObjectPtr<AActor>* FoundShot = Shots.Find(FocusShotId);
+	if (!FoundShot || !FoundShot->IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] Focus shot '%s' not found. Fallback to Overview."),
+			*FocusShotId.ToString());
+		RequestOverview();
+		return;
+	}
+
+	AActor* ShotActor = FoundShot->Get();
+
+	// Try up to Count entries to find a valid Camera
+	for (int32 i = 0; i < Count; ++i)
+	{
+		CurrentFocusIndex = (CurrentFocusIndex + 1) % Count;
+
+		// Skip if invalid
+		AActor* Candidate = FocusTargets[CurrentFocusIndex].Get();
+		if (!Candidate) continue;                           
+		bool bHasValidTag = false;
+		for (const FName& Tag : FocusTags)
+		{
+			if (Candidate->ActorHasTag(Tag))
+			{
+				bHasValidTag = true;
+				break;
+			}
+		}
+
+		// Skip if has no valid tag
+		if (!bHasValidTag) continue;
+
+		// If the shot supports a target param, pass it via BP function SetTargetRef(Target)
+		static const FName SetTargetRefFn(TEXT("SetTargetRef"));
+		if (UFunction* Fn = ShotActor->FindFunction(SetTargetRefFn))
+		{
+			struct FSetTargetRefParams { AActor* Target; };
+			FSetTargetRefParams Params; Params.Target = Candidate;
+			ShotActor->ProcessEvent(Fn, &Params);
+		}
+
+		// Blend to the chosen focus shot
+		RequestShotID(FocusShotId, BlendTime);
+
+		if (bLogDebug)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[CameraDirector] CycleNextTargetWithShot -> Target=%s, Shot=%s"),
+				*GetNameSafe(Candidate), 
+				*FocusShotId.ToString());
+		}
+		return; // done
+	}
+
+	// If we didn’t find a valid candidate, rebuild and fallback
+	BuildTagList();
 	RequestOverview();
+
+}
+
+bool UCombatCameraInstanceSubSystem::TryBeginBlend(float BlendTime)
+{
+	//TODO: Make blending logic
+	return true;
+}
+
+void UCombatCameraInstanceSubSystem::OnBlendFinished()
+{
+	bIsBlending = false;
+	BlendUnlockTime = 0.0;
+
+	if (bLogDebug)
+	{
+		UE_LOG(LogTemp, Verbose, TEXT("[CameraDirector] Blend finished (unlock)"));
+	}
+}
+
+void UCombatCameraInstanceSubSystem::ClearTagList()
+{
+	FocusTargets.Reset();
+}
+
+void UCombatCameraInstanceSubSystem::RequestShotActor(AActor* ShotActor, float BlendTime)
+{
+	if (!TryBeginBlend(BlendTime))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] RequestShot(Actor): Camera is Blending"));
+		return;
+	}
+
+	if (!ShotActor)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] RequestShot(Actor): ShotActor is null"));
+		return;
+	}
+
+	// Try to resolve an Id for tracking (reverse lookup)
+	if (APlayerController* PC = GetPC0())
+	{
+		FName ResolvedId = NAME_None;
+		for (const TPair<FName, TWeakObjectPtr<AActor>>& Pair : Shots)
+		{
+			if (Pair.Value.Get() == ShotActor)
+			{
+				ResolvedId = Pair.Key;
+				break;
+			}
+		}
+
+		// Blend params
+		FViewTargetTransitionParams Params;
+		Params.BlendTime = BlendTime;
+		Params.BlendFunction = EViewTargetBlendFunction::VTBlend_Cubic;
+
+		// Track Ids if we found one
+		LastShotId = CurrentShotId;
+		CurrentShotId = ResolvedId;
+
+		// Do the blend
+		PC->SetViewTarget(ShotActor, Params);
+
+		if (bLogDebug)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[CameraDirector] RequestShot(Actor) -> %s (Id=%s, Blend=%.2f)"),
+				*GetNameSafe(ShotActor), 
+				*ResolvedId.ToString(), 
+				BlendTime);
+		}
+	}
+}
+
+void UCombatCameraInstanceSubSystem::RequestShotID(FName ShotId, float BlendTime)
+{
+	if (!TryBeginBlend(BlendTime))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] RequestShot(Id): Camera is Blending"));
+		return;
+	}
+
+	// Try to find the shot actor in the map
+	TWeakObjectPtr<AActor>* Found = Shots.Find(ShotId);
+	if (!Found || !Found->IsValid())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] RequestShot(Id): NOT FOUND -> %s"), *ShotId.ToString());
+		return;
+	}
+
+	RequestShotActor(Found->Get(), BlendTime);
 }
 
