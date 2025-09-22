@@ -47,10 +47,10 @@ void UCombatCameraInstanceSubSystem::RegisterShot(FName ShotId, AActor* ShotActo
 
 }
 
-void UCombatCameraInstanceSubSystem::RequestOverview()
+void UCombatCameraInstanceSubSystem::RequestOverview(float BlendTime)
 {
 	// Uses Overview ID fot Base
-	RequestShotID(Overview);
+	RequestShotID(Overview, BlendTime);
 }
 
 
@@ -260,11 +260,11 @@ void UCombatCameraInstanceSubSystem::RequestShotActor(AActor* ShotActor, float B
 
 void UCombatCameraInstanceSubSystem::RequestShotID(FName ShotId, float BlendTime)
 {
-	if (!TryBeginBlend(BlendTime))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] RequestShot(Id): Camera is Blending"));
-		return;
-	}
+	//if (!TryBeginBlend(BlendTime))
+	//{
+	//	UE_LOG(LogTemp, Warning, TEXT("[CameraDirector] RequestShot(Id): Camera is Blending"));
+	//	return;
+	//}
 
 	// Try to find the shot actor in the map
 	TWeakObjectPtr<AActor>* Found = Shots.Find(ShotId);

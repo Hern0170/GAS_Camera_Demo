@@ -50,7 +50,7 @@ public:
 
 	/** Request Default Overview Shot **/
 	UFUNCTION(BlueprintCallable, Category = "CameraDirector")
-	void RequestOverview();
+	void RequestOverview(float BlendTime = 0.8f);
 
 	/** Collect all actors with any Tag into the FocusTargets list **/
 	UFUNCTION(BlueprintCallable, Category = "CameraDirector")
